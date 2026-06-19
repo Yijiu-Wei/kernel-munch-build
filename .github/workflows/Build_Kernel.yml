@@ -408,6 +408,15 @@ jobs:
               echo "🔧 Enabling KPM Configuration... (开启 KPM 配置)"
               scripts/config --file out/.config \
                   -e KPM
+              # KPM 需要操作 ELF 格式的 Image，不是压缩后的 Image.gz-dtb
+              # 自动禁用 GZIP 并启用未压缩内核
+              scripts/config --file out/.config \
+                  -d KERNEL_GZIP \
+                  -d KERNEL_LZ4 \
+                  -d KERNEL_LZMA \
+                  -d KERNEL_XZ \
+                  -e KERNEL_UNCOMPRESSED
+              echo "🔧 KPM 模式：已切换为未压缩内核 (KERNEL_UNCOMPRESSED)"
           fi
 
           # ── Droidspaces / LXC / Docker 容器支持 ──
@@ -466,12 +475,21 @@ jobs:
                   -e SYSVIPC \
                   -e OVERLAY_FS
 
+              # ── 4.19 内核补充选项（legacy netfilter，容器 NAT 必需）──
+              scripts/config --file out/.config \
+                  -e NF_CONNTRACK_IPV4 \
+                  -e NF_NAT_IPV4
+
               # 必须禁用 — 否则容器内无法联网
               scripts/config --file out/.config \
                   -d ANDROID_PARANOID_NETWORK
 
               echo "✅ Droidspaces support configured (容器支持配置完成)"
           fi
+
+          # ── 解析所有 config 依赖关系，防止 scripts/config 设置的选项被静默丢弃 ──
+          echo "🔧 Resolving Kconfig dependencies... (解析内核配置依赖)"
+          make $MAKE_ARGS olddefconfig
 
           # ═══════════════════════════════════════════════════
           # 修复 4：合并版本号逻辑，消除重叠
@@ -554,8 +572,8 @@ jobs:
                 echo "❌ KPM Patch Failed, Use Original Image (KPM 修补失败，使用原始 Image)"
               fi
             else
-              echo "ℹ️ Image not found (only Image.gz-dtb exists), skipping KPM patch"
-              echo "   KPM requires uncompressed Image — set CONFIG_KERNEL_UNCOMPRESSED=y if needed"
+              echo "❌ Image not found — KPM build failed to produce uncompressed kernel"
+              ls -la "$BOOT_DIR/"
             fi
           else
             echo "ℹ️ KPM is not enabled or KernelSU variants do not support KPM."
