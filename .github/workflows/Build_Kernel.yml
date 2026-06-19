@@ -93,6 +93,7 @@ jobs:
   build:
     needs: prepare
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     permissions:
       contents: write
       actions: write
@@ -109,6 +110,12 @@ jobs:
       DEVICE: "${{ matrix.device }}"
 
     steps:
+      # ═══════════════════════════════════════════════════
+      # 修复 1：添加 checkout 步骤，release job 需要仓库权限
+      # ═══════════════════════════════════════════════════
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
       - name: 📢 Build Information (构建信息)
         run: |
           echo "设备: ${DEVICE} | 系统: ${{ github.event.inputs.compiled_system }}"
@@ -154,18 +161,26 @@ jobs:
             ccache-${{ github.event.inputs.compiled_system }}-
             ccache-
 
-      - name: 📥 Cloning kernel source code （克隆内核源码）
+      # ═══════════════════════════════════════════════════
+      # 修复 2：内核源码必须指定 android14-lineage22-mod 分支
+      # 原代码git clone不带 -b，拉到 master (lunar-release) 分支
+      # 该分支的 defconfig 结构不同，直接导致编译失败
+      # ═══════════════════════════════════════════════════
+      - name: 📥 Cloning kernel source code (克隆内核源码)
         run: |
-          echo "正在克隆内核源码..."
-          git clone https://github.com/yspbwx2010/kernel_xiaomi_sm8250_mod.git --depth=1 $KERNEL_SOURCE
+          echo "正在克隆内核源码 (android14-lineage22-mod)..."
+          git clone https://github.com/yspbwx2010/kernel_xiaomi_sm8250_mod.git \
+            --depth=1 -b android14-lineage22-mod $KERNEL_SOURCE
           echo "✅ Kernel source code cloning complete (内核源码克隆完成)"
+          # 验证 defconfig 存在
+          ls -la $KERNEL_SOURCE/arch/arm64/configs/${DEVICE}_defconfig
 
       - name: 📥 Caching toolchain (缓存工具链)
         id: cache-toolchain
         uses: actions/cache@v4
         with:
           path: ${{ env.TOOLCHAIN_DIR }}
-          key: toolchain-clang-r547379-gcc-${{ hashFiles('**/*.sh') }}
+          key: toolchain-clang-r547379-gcc
           restore-keys: |
             toolchain-clang-r547379-gcc-
             toolchain-
@@ -178,14 +193,12 @@ jobs:
           mkdir -p "$TOOLCHAIN_DIR/gcc/gcc64"
           mkdir -p "$TOOLCHAIN_DIR/gcc/gcc32"
 
-          # 下载 Clang
           echo "正在下载 Clang..."
           cd "$TOOLCHAIN_DIR/clang"
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz -O clang-r547379.tar.gz
           tar -xzf clang-r547379.tar.gz
           rm clang-r547379.tar.gz
 
-          # 下载 GCC 64
           echo "正在下载 GCC 64位工具链..."
           cd "$TOOLCHAIN_DIR/gcc/gcc64"
           git init
@@ -193,7 +206,6 @@ jobs:
           git fetch --depth 1 origin
           git checkout FETCH_HEAD
 
-          # 下载 GCC 32
           echo "正在下载 GCC 32位工具链..."
           cd "$TOOLCHAIN_DIR/gcc/gcc32"
           git init
@@ -212,6 +224,7 @@ jobs:
           echo "⚙️ Configure KernelSU Variants: $KSU_VARIANT (配置 KernelSU 变体: $KSU_VARIANT)"
 
           if [ "$KSU_VARIANT" == "SukiSU-Ultra" ]; then
+            # SukiSU-Ultra susfs-dev 分支 — 自动适配 4.19+
             curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/susfs-dev/kernel/setup.sh" | bash -s susfs-dev
           elif [ "$KSU_VARIANT" == "RKSU" ]; then
             curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/susfs-v1.5.5/kernel/setup.sh" | bash -s susfs-v1.5.5
@@ -223,6 +236,10 @@ jobs:
 
           echo "✅ KernelSU configuration complete (KernelSU 配置完成)"
 
+      # ═══════════════════════════════════════════════════
+      # 修复 3：DroidSpaces 补丁必须先创建 patches/ 目录
+      # 原代码直接在 patches/ 下 wget，目录可能不存在
+      # ═══════════════════════════════════════════════════
       - name: 🧰 Patch DroidSpaces kernel source (打 DroidSpaces 内核补丁)
         if: ${{ github.event.inputs.droidspaces_enable == 'enable' }}
         run: |
@@ -230,23 +247,34 @@ jobs:
 
           echo "正在下载 DroidSpaces 内核补丁..."
 
+          mkdir -p patches
+
           # 补丁 1：修复 xt_qtaguid 内核崩溃
+          # 在 LXC/DroidSpaces 环境下，dev_get_stats 在不活跃接口上会 panic
           wget -q -O patches/fix_xt_qtaguid.patch \
             "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/master/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
-          patch -p1 -N < patches/fix_xt_qtaguid.patch && \
-            echo "✅ xt_qtaguid 补丁应用成功" || \
-            echo "ℹ️ xt_qtaguid 补丁可能已存在"
 
-          # 补丁 2：修复 CGroup 前缀处理
+          if patch -p1 -N < patches/fix_xt_qtaguid.patch; then
+            echo "✅ xt_qtaguid 补丁应用成功"
+          else
+            echo "ℹ️ xt_qtaguid 补丁已存在或无需应用"
+          fi
+
+          # 补丁 2：修复 CGroup 文件前缀处理
+          # 当 cgroup 设了 NOPREFIX 标志时创建 "子系统名.文件名" 符号链接
           wget -q -O patches/fix_cgroup_prefix.patch \
             "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/master/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
-          patch -p1 -N < patches/fix_cgroup_prefix.patch && \
-            echo "✅ CGroup 补丁应用成功" || \
-            echo "ℹ️ CGroup 补丁可能已存在"
+
+          if patch -p1 -N < patches/fix_cgroup_prefix.patch; then
+            echo "✅ CGroup 补丁应用成功"
+          else
+            echo "ℹ️ CGroup 补丁已存在或无需应用"
+          fi
 
           echo "✅ DroidSpaces 补丁处理完成"
 
       - name: 🔨 Build the kernel (构建内核)
+        timeout-minutes: 150
         run: |
           cd "$KERNEL_SOURCE"
 
@@ -386,7 +414,6 @@ jobs:
           if [ "$DROIDSPACES" == "enable" ]; then
               echo "🔧 Enabling Droidspaces / LXC / Docker support... (启用容器支持)"
 
-              # 必选配置
               scripts/config --file out/.config \
                   -e NAMESPACES \
                   -e UTS_NS \
@@ -404,6 +431,7 @@ jobs:
                   -e CGROUP_NET_PRIO \
                   -e CGROUP_HUGETLB \
                   -e DEVTMPFS \
+                  -e DEVTMPFS_MOUNT \
                   -e SECCOMP \
                   -e SECCOMP_FILTER \
                   -e POSIX_MQUEUE \
@@ -434,50 +462,72 @@ jobs:
                   -e IP_NF_TARGET_MASQUERADE \
                   -e IP6_NF_TARGET_MASQUERADE \
                   -e NETFILTER_XT_MATCH_COMMENT \
-                  -e DEVPTS_MULTIPLE_INSTANCES
+                  -e DEVPTS_MULTIPLE_INSTANCES \
+                  -e SYSVIPC \
+                  -e OVERLAY_FS
 
-              # 必须禁用 paranoid network（否则容器无法联网）
+              # 必须禁用 — 否则容器内无法联网
               scripts/config --file out/.config \
                   -d ANDROID_PARANOID_NETWORK
 
               echo "✅ Droidspaces support configured (容器支持配置完成)"
           fi
 
-          # ── 自定义内核版本号 ──
+          # ═══════════════════════════════════════════════════
+          # 修复 4：合并版本号逻辑，消除重叠
+          # 原代码一段替换 -dirty，紧接另一段又改 Makefile 版本号，
+          # 两段相互覆盖，逻辑矛盾
+          # ═══════════════════════════════════════════════════
           if [ ! -z "$VERSION" ]; then
               echo "🔧 设置自定义内核版本: $VERSION"
-              sed -i "s/-dirty/-$VERSION/g" scripts/setlocalversion
+
+              # 解析主版本号 (如 "4.19.315" → split into VERSION/PATCHLEVEL/SUBLEVEL)
+              main_version=$(echo "$VERSION" | grep -oE '^[0-9]+(\.[0-9]+)+')
+              if [ ! -z "$main_version" ]; then
+                IFS='.' read -ra version_parts <<< "$main_version"
+                sed -i "2s/.*/VERSION = ${version_parts[0]}/" "$KERNEL_SOURCE/Makefile"
+                if [ -n "${version_parts[1]}" ]; then
+                  sed -i "3s/.*/PATCHLEVEL = ${version_parts[1]}/" "$KERNEL_SOURCE/Makefile"
+                fi
+                if [ -n "${version_parts[2]}" ]; then
+                  sed -i "4s/.*/SUBLEVEL = ${version_parts[2]}/" "$KERNEL_SOURCE/Makefile"
+                fi
+              fi
+
+              # 自定义后缀 (如 "-KSU-DS")
+              custom_part=$(echo "$VERSION" | grep -oE '(-[a-zA-Z0-9._-]+)+$' | head -1)
+              if [ ! -z "$custom_part" ]; then
+                sed -i "s/echo \"\$res\"/echo \"${custom_part}\"/g" "$KERNEL_SOURCE/scripts/setlocalversion"
+              fi
           else
               echo "🔧 使用默认版本后缀: -Yun"
-              sed -i "s/-dirty/-Yun/g" scripts/setlocalversion
-          fi
-
-          FULL_VERSION="$VERSION"
-          if [ ! -z "$FULL_VERSION" ]; then
-            main_version=$(echo "$FULL_VERSION" | grep -oE '^[0-9]+(\.[0-9]+)*')
-            custom_part=$(echo "$FULL_VERSION" | grep -oE '(-[a-zA-Z0-9]+)*$')
-            makefile_path="$KERNEL_SOURCE/Makefile"
-            IFS='.' read -ra version_parts <<< "$main_version"
-            sed -i "2s/.*/VERSION = ${version_parts[0]}/" "$makefile_path"
-            if [ -n "${version_parts[1]}" ]; then
-              sed -i "3s/.*/PATCHLEVEL = ${version_parts[1]}/" "$makefile_path"
-            fi
-            if [ -n "${version_parts[2]}" ]; then
-              sed -i "4s/.*/SUBLEVEL = ${version_parts[2]}/" "$makefile_path"
-            fi
-            sed -i "s/echo \"\$res\"/echo \"${custom_part}\"/g" "$KERNEL_SOURCE/scripts/setlocalversion"
+              sed -i "s/-dirty/-Yun/g" "$KERNEL_SOURCE/scripts/setlocalversion"
           fi
 
           # ── 开始构建 ──
           echo "🚀 Start building the kernel... (开始构建内核)"
           make $MAKE_ARGS -j$(nproc --all) 2>&1 | tee build.log
 
-          if [ -f "$KERNEL_SOURCE/out/arch/arm64/boot/Image" ]; then
-              echo "✅ Kernel Build Successful (内核构建成功)"
+          # ═══════════════════════════════════════════════════
+          # 修复 5：构建校验要兼容 Image 和 Image.gz-dtb 两种输出
+          # munch_defconfig 默认用 GZIP，输出 Image.gz-dtb
+          # ═══════════════════════════════════════════════════
+          BOOT_DIR="$KERNEL_SOURCE/out/arch/arm64/boot"
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+              echo "✅ Kernel Build Successful (内核构建成功) — Image.gz-dtb"
+              ls -lh "$BOOT_DIR/Image.gz-dtb"
+          elif [ -f "$BOOT_DIR/Image" ]; then
+              echo "✅ Kernel Build Successful (内核构建成功) — Image"
+              ls -lh "$BOOT_DIR/Image"
+          elif [ -f "$BOOT_DIR/Image.gz" ]; then
+              echo "✅ Kernel Build Successful (内核构建成功) — Image.gz"
+              ls -lh "$BOOT_DIR/Image.gz"
           else
-              echo "❌ Kernel build failure (内核构建失败)"
-              echo "error log (错误日志):"
+              echo "❌ Kernel build failure (内核构建失败) — 未找到内核镜像"
+              echo "--- 构建日志最后 100 行 ---"
               tail -n 100 build.log
+              echo "--- out/arch/arm64/boot/ 目录内容 ---"
+              ls -la "$BOOT_DIR/" 2>/dev/null || echo "目录不存在"
               exit 1
           fi
 
@@ -490,17 +540,22 @@ jobs:
           KPM_ENABLE="${{ github.event.inputs.kpm_enable }}"
 
           if [ "$KSU_VARIANT" == "SukiSU-Ultra" ] && [ "$KPM_ENABLE" == "enable" ]; then
-            echo "🛠️ 正在修补 Image 文件..."
-            cd "$KERNEL_SOURCE/out/arch/arm64/boot"
-            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
-            chmod 777 patch
-            ./patch
-            if [ $? -eq 0 ]; then
-              rm -f Image
-              mv oImage Image
-              echo "✅ Image file repair complete (Image 文件修补完成)"
+            BOOT_DIR="$KERNEL_SOURCE/out/arch/arm64/boot"
+            if [ -f "$BOOT_DIR/Image" ]; then
+              echo "🛠️ 正在修补 Image 文件 (KPM)..."
+              cd "$BOOT_DIR"
+              curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU_patch/refs/heads/main/kpm/patch_linux" -o patch
+              chmod 777 patch
+              if ./patch; then
+                rm -f Image
+                mv oImage Image
+                echo "✅ KPM patch applied (KPM 修补完成)"
+              else
+                echo "❌ KPM Patch Failed, Use Original Image (KPM 修补失败，使用原始 Image)"
+              fi
             else
-              echo "❌ KPM Patch Failed, Use Original Image (KPM 修补失败，使用原始 Image)"
+              echo "ℹ️ Image not found (only Image.gz-dtb exists), skipping KPM patch"
+              echo "   KPM requires uncompressed Image — set CONFIG_KERNEL_UNCOMPRESSED=y if needed"
             fi
           else
             echo "ℹ️ KPM is not enabled or KernelSU variants do not support KPM."
@@ -514,6 +569,10 @@ jobs:
           BUILD_DATE=$(date +%Y%m%d)
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
 
+      # ═══════════════════════════════════════════════════
+      # 修复 6：AnyKernel3 打包要正确选择内核镜像
+      # 同时创建 munch 专用的 anykernel.sh
+      # ═══════════════════════════════════════════════════
       - name: 📦 Package kernel to AnyKernel3 (打包内核到 AnyKernel3)
         run: |
           SYSTEM="${{ github.event.inputs.compiled_system }}"
@@ -532,8 +591,32 @@ jobs:
 
           rm -rf .git .github README.md
 
-          # 复制内核镜像
-          cp "$KERNEL_SOURCE/out/arch/arm64/boot/Image" ./
+          # 复制内核镜像 — 优先 Image.gz-dtb，回退 Image
+          BOOT_DIR="$KERNEL_SOURCE/out/arch/arm64/boot"
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            echo "复制 Image.gz-dtb (内嵌 DTB)"
+            cp "$BOOT_DIR/Image.gz-dtb" ./
+          elif [ -f "$BOOT_DIR/Image" ]; then
+            echo "复制 Image (未压缩)"
+            cp "$BOOT_DIR/Image" ./
+          else
+            echo "❌ 未找到内核镜像文件！"
+            ls -la "$BOOT_DIR/"
+            exit 1
+          fi
+
+          # 创建 munch 专用的 anykernel.sh
+          cat > anykernel.sh << 'AKEOF'
+# Redmi K40S / POCO F4 (munch) — AnyKernel3
+kernel.string=Kernel for Redmi K40S (munch) / POCO F4
+device.name1=munch
+device.name2=munchin
+device.name3=RedmiK40S
+device.name4=POCOF4
+block=/dev/block/bootdevice/by-name/boot
+is_slot_device=auto
+ramdisk_compression=gzip
+AKEOF
 
           # 打包
           echo "📦 Flashing package being created (正在创建刷机包): $ZIP_NAME"
@@ -554,6 +637,12 @@ jobs:
           name: Kernel-${{ matrix.device }}
           path: ${{ github.workspace }}/ak3_out/*.zip
 
+  # ═══════════════════════════════════════════════════
+  # 修复 7：Release job 使用 ${{ github.workspace }}
+  # 原代码硬编码 /home/runner/work/kernel_xiaomi_sm8250_mod/
+  # 但仓库名是 kernel-munch-build，路径不匹配导致 release 失败
+  # 修复 8：softprops/action-gh-release 升级到 @v2
+  # ═══════════════════════════════════════════════════
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -563,11 +652,11 @@ jobs:
     - name: 📥 Download all zip artifacts (下载所有 zip 构建产物)
       uses: actions/download-artifact@v4
       with:
-        path: out
+        path: ${{ github.workspace }}/out
 
     - name: 📝 Preparing files for release (准备发布文件)
       run: |
-        mkdir -p release
+        mkdir -p ${{ github.workspace }}/release
         cd ${{ github.workspace }}/out
         device_list=()
         for dir in */; do
@@ -577,7 +666,7 @@ jobs:
           cd "$dir"
           for zip_file in *; do
             if [[ -f "$zip_file" && "$zip_file" == *.zip ]]; then
-              mv "$zip_file" ${{ github.workspace }}/release
+              mv "$zip_file" ${{ github.workspace }}/release/
             fi
           done
           cd ..
@@ -593,38 +682,38 @@ jobs:
         echo "GIT_COMMIT_ID=$GIT_COMMIT_ID" >> $GITHUB_ENV
 
     - name: 📤 Post to Release (发布到 Release)
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: ${{ github.workspace }}/release/*.zip
-        name: Kernel_（${{ env.TARGET_DEVICES }}）_${{ github.event.inputs.kernelsu_variant }}_${{ github.event.inputs.compiled_system }}_${{ env.RELEASE_DATE }}_${{ env.GIT_COMMIT_ID }}_${{ github.event.inputs.build_type }}
-        tag_name: Kernel_（${{ env.TARGET_DEVICES }}）_${{ github.event.inputs.kernelsu_variant }}_${{ github.event.inputs.compiled_system }}_${{ env.RELEASE_DATE }}_${{ env.GIT_COMMIT_ID }}
+        name: Kernel (${{ env.TARGET_DEVICES }}) ${{ github.event.inputs.kernelsu_variant }} ${{ github.event.inputs.compiled_system }} ${{ env.RELEASE_DATE }}
+        tag_name: Kernel-${{ env.TARGET_DEVICES }}-${{ github.event.inputs.kernelsu_variant }}-${{ env.RELEASE_DATE }}
         body: |
-          ## 📱kernel build information | 内核构建信息
+          ## 📱 Kernel Build Information
 
-          ### 🌐 English
-          - **Target Device:** ${{ env.TARGET_DEVICES }}
-          - **Compiled System:** ${{ github.event.inputs.compiled_system }}
-          - **KernelSU Variant:** ${{ github.event.inputs.kernelsu_variant }}
-          - **KPM Support:** ${{ github.event.inputs.kpm_enable }}
-          - **Droidspaces Support:** ${{ github.event.inputs.droidspaces_enable }}
-          - **Build Type:** ${{ github.event.inputs.build_type }}
-          - **Build Date:** ${{ env.RELEASE_DATE }}
-          - **Commit ID:** ${{ env.GIT_COMMIT_ID }}
+          **English:**
+          - Target Device: ${{ env.TARGET_DEVICES }}
+          - Compiled System: ${{ github.event.inputs.compiled_system }}
+          - KernelSU Variant: ${{ github.event.inputs.kernelsu_variant }}
+          - KPM Support: ${{ github.event.inputs.kpm_enable }}
+          - Droidspaces Support: ${{ github.event.inputs.droidspaces_enable }}
+          - Build Type: ${{ github.event.inputs.build_type }}
+          - Build Date: ${{ env.RELEASE_DATE }}
+          - Commit ID: ${{ env.GIT_COMMIT_ID }}
 
-          ### 🇨🇳 中文
-          - **目标机型:** ${{ env.TARGET_DEVICES }}
-          - **适用系统:** ${{ github.event.inputs.compiled_system }}
-          - **KernelSU变体:** ${{ github.event.inputs.kernelsu_variant }}
-          - **KPM支持:** ${{ github.event.inputs.kpm_enable }}
-          - **Droidspaces支持:** ${{ github.event.inputs.droidspaces_enable }}
-          - **构建类型:** ${{ github.event.inputs.build_type }}
-          - **构建日期:** ${{ env.RELEASE_DATE }}
-          - **提交ID:** ${{ env.GIT_COMMIT_ID }}
+          **中文:**
+          - 目标机型: ${{ env.TARGET_DEVICES }}
+          - 适用系统: ${{ github.event.inputs.compiled_system }}
+          - KernelSU变体: ${{ github.event.inputs.kernelsu_variant }}
+          - KPM支持: ${{ github.event.inputs.kpm_enable }}
+          - Droidspaces支持: ${{ github.event.inputs.droidspaces_enable }}
+          - 构建类型: ${{ github.event.inputs.build_type }}
+          - 构建日期: ${{ env.RELEASE_DATE }}
+          - 提交ID: ${{ env.GIT_COMMIT_ID }}
 
-          ### 📋 安装说明
+          **安装说明:**
           1. 下载对应机型的刷机包
-          2. 进入Recovery模式
-          3. 通过Recovery刷入刷机包
+          2. 进入 Recovery 模式
+          3. 通过 Recovery 刷入刷机包
           4. 重启设备
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
