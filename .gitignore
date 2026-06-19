@@ -1,0 +1,36 @@
+# ============ Python Runtime ============
+ok-ww/data/apps/ok-ww/python/
+
+# ============ Python cache ============
+__pycache__/
+**/cache/pip/
+*.cache/
+
+# ============ Binary & executable ============
+*.exe
+*.pyd
+
+# ============ Logs & Reports ============
+*.log
+logs/
+ok-ww/logs/
+shenghai/logs/
+shenghai/report/
+
+# ============ Browser & web data ============
+ok-ww/EBWebView/
+
+# ============ IDE ============
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ============ OS ============
+.DS_Store
+Thumbs.db
+
+# ============ Temporary ============
+*~
+*.tmp
+*.temp
