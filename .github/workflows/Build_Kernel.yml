@@ -660,17 +660,16 @@ jobs:
           fi
 
           # 创建 munch 专用的 anykernel.sh
-          cat > anykernel.sh << 'AKEOF'
-# Redmi K40S / POCO F4 (munch) — AnyKernel3
-kernel.string=Kernel for Redmi K40S (munch) / POCO F4
-device.name1=munch
-device.name2=munchin
-device.name3=RedmiK40S
-device.name4=POCOF4
-block=/dev/block/bootdevice/by-name/boot
-is_slot_device=auto
-ramdisk_compression=gzip
-AKEOF
+          # 注意：不能使用 heredoc（<<），YAML 的 run:| 块与 heredoc 的列1需求冲突
+          echo '# Redmi K40S / POCO F4 (munch) — AnyKernel3' > anykernel.sh
+          echo 'kernel.string=Kernel for Redmi K40S (munch) / POCO F4' >> anykernel.sh
+          echo 'device.name1=munch' >> anykernel.sh
+          echo 'device.name2=munchin' >> anykernel.sh
+          echo 'device.name3=RedmiK40S' >> anykernel.sh
+          echo 'device.name4=POCOF4' >> anykernel.sh
+          echo 'block=/dev/block/bootdevice/by-name/boot' >> anykernel.sh
+          echo 'is_slot_device=auto' >> anykernel.sh
+          echo 'ramdisk_compression=gzip' >> anykernel.sh
 
           # 打包
           echo "📦 Flashing package being created (正在创建刷机包): $ZIP_NAME"
