@@ -118,6 +118,33 @@ jobs:
           echo "设备: ${DEVICE} | 系统: ${{ github.event.inputs.compiled_system }}"
           echo "KernelSU变体: ${{ github.event.inputs.kernelsu_variant }} | KPM: ${{ github.event.inputs.kpm_enable }}"
           echo "Droidspaces: ${{ github.event.inputs.droidspaces_enable }} | 构建类型: ${{ github.event.inputs.build_type }}"
+          echo ""
+          echo "═══════════════════════════════════════════════"
+          echo " 兼容性检查报告"
+          echo "═══════════════════════════════════════════════"
+          echo " 设备: Redmi K40S / POCO F4 (munch)"
+          echo " SoC: Qualcomm SM8250-AC (Snapdragon 870)"
+          echo " 系统: HyperOS 1 (Android 14)"
+          echo " 内核源码: yspbwx2010/kernel_xiaomi_sm8250_mod"
+          echo " 分支: android14-lineage22-mod (4.19.325)"
+          echo " 工具链: Clang 14 (r450784d) + GCC 4.9"
+          echo ""
+          echo " ✅ 内核源码: 原生支持 munch + MIUI/HyperOS Android 14"
+          echo " ✅ KernelSU: SukiSU-Ultra main —— 官方支持 4.4+ 内核"
+          echo " ✅ DroidSpaces: 官方支持 4.19 (4.4-4.19 = stable)"
+          echo " ⚠️  Clang r547379 → r450784d: Clang 19 不兼容 4.19，已降级为 Clang 14"
+          echo ""
+
+          KSU_VAR="${{ github.event.inputs.kernelsu_variant }}"
+          DS_ENABLE="${{ github.event.inputs.droidspaces_enable }}"
+
+          if [ "$DS_ENABLE" == "enable" ] && [ "$KSU_VAR" == "SukiSU-Ultra" ]; then
+            echo " ⚠️  DroidSpaces + SukiSU-Ultra(SUSFS) 共存注意:"
+            echo "    DroidSpaces 官方说明不支持 SuSFS。如果容器启动失败,"
+            echo "    建议关闭 SUSFS HIDE MOUNTS 或换用 KernelSU(None-SUSFS) 变体"
+            echo ""
+          fi
+          echo "═══════════════════════════════════════════════"
 
       - name: 🚀 Maximize build space (最大化构建空间)
         uses: easimon/maximize-build-space@master
@@ -172,9 +199,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.TOOLCHAIN_DIR }}
-          key: toolchain-clang-r547379-gcc
+          # ⚠️ 4.19 内核兼容性：使用 Clang 14 (r450784d) 而非 Clang 19 (r547379)
+          # 4.19 内核代码使用较老的 C 方言和编译器标志，Clang 19+ 可能不兼容
+          # Clang 14 (r450784d) 是 Android 14 内核编译的标准工具链
+          key: toolchain-clang-r450784d-gcc
           restore-keys: |
-            toolchain-clang-r547379-gcc-
+            toolchain-clang-r450784d-gcc-
             toolchain-
 
       - name: 📥 Download the compilation toolchain (下载编译工具链)
@@ -185,11 +215,11 @@ jobs:
           mkdir -p "$TOOLCHAIN_DIR/gcc/gcc64"
           mkdir -p "$TOOLCHAIN_DIR/gcc/gcc32"
 
-          echo "正在下载 Clang..."
+          echo "正在下载 Clang 14 (r450784d — 4.19 内核兼容版本)..."
           cd "$TOOLCHAIN_DIR/clang"
-          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz -O clang-r547379.tar.gz
-          tar -xzf clang-r547379.tar.gz
-          rm clang-r547379.tar.gz
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r450784d.tar.gz -O clang-r450784d.tar.gz
+          tar -xzf clang-r450784d.tar.gz
+          rm clang-r450784d.tar.gz
 
           echo "正在下载 GCC 64位工具链..."
           cd "$TOOLCHAIN_DIR/gcc/gcc64"
@@ -383,18 +413,31 @@ jobs:
                   -e KSU_SUSFS_HAS_MAGIC_MOUNT \
                   -e KSU_SUSFS_SUS_PATH \
                   -e KSU_SUSFS_SUS_MOUNT \
-                  -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
-                  -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
                   -e KSU_SUSFS_SUS_KSTAT \
                   -d KSU_SUSFS_SUS_OVERLAYFS \
-                  -e KSU_SUSFS_TRY_UMOUNT \
-                  -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT \
                   -e KSU_SUSFS_SPOOF_UNAME \
                   -e KSU_SUSFS_ENABLE_LOG \
                   -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
                   -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
                   -e KSU_SUSFS_OPEN_REDIRECT \
                   -d KSU_SUSFS_SUS_SU
+
+              # SUSFS auto-mount 和 auto-umount 功能 — 如果同时启用 DroidSpaces 则禁用
+              # DroidSpaces 官方文档明确说明不支持 SuSFS，尤其是 mount 隐藏功能会导致容器异常
+              if [ "$DROIDSPACES" == "enable" ]; then
+                  echo "   ℹ️ DroidSpaces 已启用 → 禁用 SUSFS auto-mount/hide 功能以避免冲突"
+                  scripts/config --file out/.config \
+                      -d KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+                      -d KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+                      -d KSU_SUSFS_TRY_UMOUNT \
+                      -d KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+              else
+                  scripts/config --file out/.config \
+                      -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT \
+                      -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT \
+                      -e KSU_SUSFS_TRY_UMOUNT \
+                      -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+              fi
           elif [ "$KSU" == "KernelSU" ]; then
               echo "🔧 Applying KernelSU Configuration... (应用 KernelSU 配置)"
               scripts/config --file out/.config \
