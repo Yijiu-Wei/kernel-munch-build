@@ -110,9 +110,6 @@ jobs:
       DEVICE: "${{ matrix.device }}"
 
     steps:
-      # ═══════════════════════════════════════════════════
-      # 修复 1：添加 checkout 步骤，release job 需要仓库权限
-      # ═══════════════════════════════════════════════════
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
 
@@ -161,18 +158,13 @@ jobs:
             ccache-${{ github.event.inputs.compiled_system }}-
             ccache-
 
-      # ═══════════════════════════════════════════════════
-      # 修复 2：内核源码必须指定 android14-lineage22-mod 分支
-      # 原代码git clone不带 -b，拉到 master (lunar-release) 分支
-      # 该分支的 defconfig 结构不同，直接导致编译失败
-      # ═══════════════════════════════════════════════════
+      # ── 克隆内核源码（必须指定 android14-lineage22-mod 分支）──
       - name: 📥 Cloning kernel source code (克隆内核源码)
         run: |
           echo "正在克隆内核源码 (android14-lineage22-mod)..."
           git clone https://github.com/yspbwx2010/kernel_xiaomi_sm8250_mod.git \
             --depth=1 -b android14-lineage22-mod $KERNEL_SOURCE
           echo "✅ Kernel source code cloning complete (内核源码克隆完成)"
-          # 验证 defconfig 存在
           ls -la $KERNEL_SOURCE/arch/arm64/configs/${DEVICE}_defconfig
 
       - name: 📥 Caching toolchain (缓存工具链)
@@ -215,6 +207,11 @@ jobs:
 
           echo "✅ Toolchain download complete (工具链下载完成)"
 
+      # ── KernelSU 配置 ──
+      # ⚠️ 已验证的兼容分支：
+      #   SukiSU-Ultra: main (susfs-dev 已失效 → 404)
+      #   RKSU:         susfs-rksu-master (susfs-v1.5.5 已失效 → 404)
+      #   KernelSU:     v0.9.5 (来自 tiann/KernelSU main)
       - name: ⚙️ Configuring KernelSU (配置 KernelSU)
         run: |
           cd "$KERNEL_SOURCE"
@@ -224,10 +221,9 @@ jobs:
           echo "⚙️ Configure KernelSU Variants: $KSU_VARIANT (配置 KernelSU 变体: $KSU_VARIANT)"
 
           if [ "$KSU_VARIANT" == "SukiSU-Ultra" ]; then
-            # SukiSU-Ultra susfs-dev 分支 — 自动适配 4.19+
-            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/susfs-dev/kernel/setup.sh" | bash -s susfs-dev
+            curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
           elif [ "$KSU_VARIANT" == "RKSU" ]; then
-            curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/susfs-v1.5.5/kernel/setup.sh" | bash -s susfs-v1.5.5
+            curl -LSs "https://raw.githubusercontent.com/rsuntk/KernelSU/susfs-rksu-master/kernel/setup.sh" | bash -s susfs-rksu-master
           elif [ "$KSU_VARIANT" == "KernelSU" ]; then
             curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
           else
@@ -236,21 +232,16 @@ jobs:
 
           echo "✅ KernelSU configuration complete (KernelSU 配置完成)"
 
-      # ═══════════════════════════════════════════════════
-      # 修复 3：DroidSpaces 补丁必须先创建 patches/ 目录
-      # 原代码直接在 patches/ 下 wget，目录可能不存在
-      # ═══════════════════════════════════════════════════
+      # ── DroidSpaces 内核补丁 ──
       - name: 🧰 Patch DroidSpaces kernel source (打 DroidSpaces 内核补丁)
         if: ${{ github.event.inputs.droidspaces_enable == 'enable' }}
         run: |
           cd "$KERNEL_SOURCE"
 
           echo "正在下载 DroidSpaces 内核补丁..."
-
           mkdir -p patches
 
           # 补丁 1：修复 xt_qtaguid 内核崩溃
-          # 在 LXC/DroidSpaces 环境下，dev_get_stats 在不活跃接口上会 panic
           wget -q -O patches/fix_xt_qtaguid.patch \
             "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/master/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
 
@@ -261,7 +252,6 @@ jobs:
           fi
 
           # 补丁 2：修复 CGroup 文件前缀处理
-          # 当 cgroup 设了 NOPREFIX 标志时创建 "子系统名.文件名" 符号链接
           wget -q -O patches/fix_cgroup_prefix.patch \
             "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/master/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
 
@@ -298,6 +288,14 @@ jobs:
           # ── 生成设备配置 ──
           echo "🔧 Generating ${DEVICE} configuration... (正在生成 ${DEVICE} 的配置)"
           make $MAKE_ARGS -j$(nproc --all) ${DEVICE}_defconfig
+
+          # ═══════════════════════════════════════════════════
+          # munch_defconfig 配置说明（兼容性确认）：
+          #   CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=y
+          #   → 输出 Image（未压缩 ELF），不是 Image.gz-dtb
+          #   CONFIG_BUILD_ARM64_DT_OVERLAY=y
+          #   → 使用 DT overlay，DTB 由 bootloader 处理
+          # ═══════════════════════════════════════════════════
 
           # ── 基本优化配置 ──
           echo "🔧 Applying basic optimized configurations... (应用基本优化配置)"
@@ -408,15 +406,8 @@ jobs:
               echo "🔧 Enabling KPM Configuration... (开启 KPM 配置)"
               scripts/config --file out/.config \
                   -e KPM
-              # KPM 需要操作 ELF 格式的 Image，不是压缩后的 Image.gz-dtb
-              # 自动禁用 GZIP 并启用未压缩内核
-              scripts/config --file out/.config \
-                  -d KERNEL_GZIP \
-                  -d KERNEL_LZ4 \
-                  -d KERNEL_LZMA \
-                  -d KERNEL_XZ \
-                  -e KERNEL_UNCOMPRESSED
-              echo "🔧 KPM 模式：已切换为未压缩内核 (KERNEL_UNCOMPRESSED)"
+              # 注意：munch_defconfig 已设置 CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=y
+              # 输出本身就是 Image（未压缩），KPM 可直接修补，无需额外切换
           fi
 
           # ── Droidspaces / LXC / Docker 容器支持 ──
@@ -487,19 +478,14 @@ jobs:
               echo "✅ Droidspaces support configured (容器支持配置完成)"
           fi
 
-          # ── 解析所有 config 依赖关系，防止 scripts/config 设置的选项被静默丢弃 ──
+          # ── 解析所有 config 依赖关系 ──
           echo "🔧 Resolving Kconfig dependencies... (解析内核配置依赖)"
           make $MAKE_ARGS olddefconfig
 
-          # ═══════════════════════════════════════════════════
-          # 修复 4：合并版本号逻辑，消除重叠
-          # 原代码一段替换 -dirty，紧接另一段又改 Makefile 版本号，
-          # 两段相互覆盖，逻辑矛盾
-          # ═══════════════════════════════════════════════════
+          # ── 自定义内核版本号 ──
           if [ ! -z "$VERSION" ]; then
               echo "🔧 设置自定义内核版本: $VERSION"
 
-              # 解析主版本号 (如 "4.19.315" → split into VERSION/PATCHLEVEL/SUBLEVEL)
               main_version=$(echo "$VERSION" | grep -oE '^[0-9]+(\.[0-9]+)+')
               if [ ! -z "$main_version" ]; then
                 IFS='.' read -ra version_parts <<< "$main_version"
@@ -512,7 +498,6 @@ jobs:
                 fi
               fi
 
-              # 自定义后缀 (如 "-KSU-DS")
               custom_part=$(echo "$VERSION" | grep -oE '(-[a-zA-Z0-9._-]+)+$' | head -1)
               if [ ! -z "$custom_part" ]; then
                 sed -i "s/echo \"\$res\"/echo \"${custom_part}\"/g" "$KERNEL_SOURCE/scripts/setlocalversion"
@@ -522,24 +507,30 @@ jobs:
               sed -i "s/-dirty/-Yun/g" "$KERNEL_SOURCE/scripts/setlocalversion"
           fi
 
+          # ═══════════════════════════════════════════════════
+          # 注意：munch_defconfig 使用 CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=y
+          # 输出的是未压缩的 Image，不是 Image.gz-dtb
+          # 以下校验和打包均以 Image 为优先
+          # ═══════════════════════════════════════════════════
+
           # ── 开始构建 ──
           echo "🚀 Start building the kernel... (开始构建内核)"
           make $MAKE_ARGS -j$(nproc --all) 2>&1 | tee build.log
 
-          # ═══════════════════════════════════════════════════
-          # 修复 5：构建校验要兼容 Image 和 Image.gz-dtb 两种输出
-          # munch_defconfig 默认用 GZIP，输出 Image.gz-dtb
-          # ═══════════════════════════════════════════════════
+          # ── 构建校验（优先 Image，回退其他格式）──
           BOOT_DIR="$KERNEL_SOURCE/out/arch/arm64/boot"
-          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+          if [ -f "$BOOT_DIR/Image" ]; then
+              echo "✅ Kernel Build Successful (内核构建成功) — Image (uncompressed)"
+              ls -lh "$BOOT_DIR/Image"
+              echo "Image" > "$BOOT_DIR/.kernel_type"
+          elif [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
               echo "✅ Kernel Build Successful (内核构建成功) — Image.gz-dtb"
               ls -lh "$BOOT_DIR/Image.gz-dtb"
-          elif [ -f "$BOOT_DIR/Image" ]; then
-              echo "✅ Kernel Build Successful (内核构建成功) — Image"
-              ls -lh "$BOOT_DIR/Image"
+              echo "Image.gz-dtb" > "$BOOT_DIR/.kernel_type"
           elif [ -f "$BOOT_DIR/Image.gz" ]; then
               echo "✅ Kernel Build Successful (内核构建成功) — Image.gz"
               ls -lh "$BOOT_DIR/Image.gz"
+              echo "Image.gz" > "$BOOT_DIR/.kernel_type"
           else
               echo "❌ Kernel build failure (内核构建失败) — 未找到内核镜像"
               echo "--- 构建日志最后 100 行 ---"
@@ -552,6 +543,8 @@ jobs:
           echo "📊 CCache Statistics (CCache 统计信息):"
           ccache --show-stats
 
+      # ── KPM 修补 Image 文件 ──
+      # munch_defconfig 输出 Image（未压缩），KPM 直接可用
       - name: 🛠️ KPM Patching Image Files (KPM 修补 Image 文件)
         run: |
           KSU_VARIANT="${{ github.event.inputs.kernelsu_variant }}"
@@ -572,7 +565,7 @@ jobs:
                 echo "❌ KPM Patch Failed, Use Original Image (KPM 修补失败，使用原始 Image)"
               fi
             else
-              echo "❌ Image not found — KPM build failed to produce uncompressed kernel"
+              echo "❌ Image not found — cannot apply KPM patch"
               ls -la "$BOOT_DIR/"
             fi
           else
@@ -587,10 +580,7 @@ jobs:
           BUILD_DATE=$(date +%Y%m%d)
           echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
 
-      # ═══════════════════════════════════════════════════
-      # 修复 6：AnyKernel3 打包要正确选择内核镜像
-      # 同时创建 munch 专用的 anykernel.sh
-      # ═══════════════════════════════════════════════════
+      # ── 打包 AnyKernel3（优先 Image）──
       - name: 📦 Package kernel to AnyKernel3 (打包内核到 AnyKernel3)
         run: |
           SYSTEM="${{ github.event.inputs.compiled_system }}"
@@ -609,14 +599,17 @@ jobs:
 
           rm -rf .git .github README.md
 
-          # 复制内核镜像 — 优先 Image.gz-dtb，回退 Image
+          # 复制内核镜像 — munch_defconfig 输出 Image（未压缩）
           BOOT_DIR="$KERNEL_SOURCE/out/arch/arm64/boot"
-          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+          if [ -f "$BOOT_DIR/Image" ]; then
+            echo "复制 Image (未压缩，munch_defconfig 默认输出)"
+            cp "$BOOT_DIR/Image" ./
+          elif [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
             echo "复制 Image.gz-dtb (内嵌 DTB)"
             cp "$BOOT_DIR/Image.gz-dtb" ./
-          elif [ -f "$BOOT_DIR/Image" ]; then
-            echo "复制 Image (未压缩)"
-            cp "$BOOT_DIR/Image" ./
+          elif [ -f "$BOOT_DIR/Image.gz" ]; then
+            echo "复制 Image.gz"
+            cp "$BOOT_DIR/Image.gz" ./
           else
             echo "❌ 未找到内核镜像文件！"
             ls -la "$BOOT_DIR/"
@@ -655,12 +648,6 @@ AKEOF
           name: Kernel-${{ matrix.device }}
           path: ${{ github.workspace }}/ak3_out/*.zip
 
-  # ═══════════════════════════════════════════════════
-  # 修复 7：Release job 使用 ${{ github.workspace }}
-  # 原代码硬编码 /home/runner/work/kernel_xiaomi_sm8250_mod/
-  # 但仓库名是 kernel-munch-build，路径不匹配导致 release 失败
-  # 修复 8：softprops/action-gh-release 升级到 @v2
-  # ═══════════════════════════════════════════════════
   release:
     needs: build
     runs-on: ubuntu-latest
